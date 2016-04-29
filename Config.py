@@ -13,10 +13,10 @@ class Config:
     }
     debug = False
     pause = False
-    filename = 'StoryData.txt'
+    filename = 'StoryData_de.txt'
 
     def debugPrint(message):
         print('debug:=>%s' % message)
 
     def debugPause():
-        input('debug:=>程序暂停，按回车继续')
+        input('debug:=>Pause, Enter drücken, um fortzufahren')

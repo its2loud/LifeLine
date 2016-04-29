@@ -41,7 +41,7 @@ class FileReader:
                 self.__recordScript(script)
             __FILE.close()
         except:
-            print('加载游戏脚本出错')
+            print('Fehler beim Laden des Skripts')
             raise
 
     def __iter__(self):
