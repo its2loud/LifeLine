@@ -1,9 +1,34 @@
-__author__ = 'haoyu'
-
 import time
 import re
 from Config import Config
+import requests
+import json
 
+TOKEN = "XXXXXXXXXXX:YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY"
+
+def sendmessage(text, chatid):
+    message = {'chat_id': chatid, 
+               'text': text,
+               'reply_markup':'{"hide_keyboard": true}'
+               }
+    requests.post('https://api.telegram.org/bot' + TOKEN + '/sendMessage', data=message)
+
+def timeDelay_Seconds(timeDelay):
+    delay=2.5
+    try:
+        if timeDelay=="norm":
+            delay=2.5
+        elif "s" in str(timeDelay):
+            delay = int(timeDelay.replace("s",""))
+        elif "m" in str(timeDelay):
+            delay = int(timeDelay.replace("m",""))*60
+        elif "h" in str(timeDelay):
+            delay = int(timeDelay.replace("h",""))*3600
+        else:
+            delay = int(timeDelay)
+    except Exception as e:
+        print("Error parsing timeDelay: "+str(e))
+    return delay
 
 class GameBlock:
     def __init__(self, name):
@@ -16,6 +41,7 @@ class GameBlock:
         self.__choicesJump = []
         self.__choicesShow = []
         self.__choices = 0
+        self.script_buffer=""
 
     def __doChoice(self, script):
         tagStart = script.find('[[')
@@ -65,11 +91,17 @@ class GameBlock:
             self.__doElse(script)
             return
 
-    def __doJump(self, script):
+    def __doJump(self, chatid, script):
         if script.startswith('[[delay'):
             pipPosition = script.find('|')
             self.nextName = script[pipPosition + 1:-2]
-            self.__delay(timeDelay='long', busy=True)
+            delay_by_script = script[7:pipPosition]
+            print("Delay by Script: "+delay_by_script)
+            if self.script_buffer!="":
+                    self.__delay(chatid)
+                    sendmessage(self.script_buffer,chatid)
+                    self.script_buffer=""
+            self.__delay(chatid, timeDelay=delay_by_script, busy=True)
         else:
             self.nextName = script[2:-2]
         if Config.debug:
@@ -100,14 +132,14 @@ class GameBlock:
             parameter = ''
         print('\b%s' % parameter, end='')
 
-    def __doScript(self, script):
+    def __doScript(self, chatid, script):
         if script.startswith('<<if') or script.startswith('<<elseif') or \
                 script.startswith('<<endif') or script.startswith('<<else'):
             self.__doJudge(script)
             return
         if self.__if[-1]:
             if script.startswith('[['):
-                self.__doJump(script)
+                self.__doJump(chatid, script)
                 return
             if script.startswith('<<silently') or script.startswith('<<silently'):
                 self.__doSilently(script)
@@ -122,55 +154,65 @@ class GameBlock:
                 self.__doPrintParameter(script)
                 return
 
-    def __makeChoice(self):
-        self.__delay()
-        print()
+    def __makeChoice(self, message, chatid):
+        self.__delay(chatid)
+        print("MAKE CHOICE")
+        keyboard = []    
+        awaitingOptions = {}
         for i in range(0, self.__choices):
-            print('%d => %s' % (i + 1, self.__choicesShow[i]))
-        choice = 0
-        while True:
-            try:
-                choice = int(input('做出选择：')) - 1
-                if choice < 0 or choice > 1:
-                    raise
-                print()
-                break
-            except:
-                continue
-        self.nextName = self.__choicesJump[choice]
+            keyboard_line = []        
+            awaitingOptions[self.__choicesShow[i]]=self.__choicesJump[i]
+            keyboard_line.append(self.__choicesShow[i])
+            keyboard.append(keyboard_line)
+        print(json.dumps(keyboard))
+        message = { 'chat_id': chatid, 
+                    'text': message,
+                    'reply_markup': '{"keyboard": '+json.dumps(keyboard)+', "one_time_keyboard":true, "resize_keyboard":true}'
+                  }
+        requests.post('https://api.telegram.org/bot' + TOKEN + '/sendMessage', data=message)
+        return awaitingOptions
 
-    def __delay(self, timeDelay='norm', busy=False):
-        delay = 1.5
-        if isinstance(timeDelay, int):
-            delay = timeDelay
-        elif isinstance(timeDelay, str):
-            if timeDelay not in Config.delayTable.keys():
-                timeDelay = 'norm'
-            delay = Config.delayTable[timeDelay]
+    def __delay(self, chatid, timeDelay="norm", busy=False):
+        delay = timeDelay_Seconds(timeDelay)
         if Config.debug:
             delay = 0
         if busy:
-            print()
-            print('[泰勒忙碌]')
-            print()
-        time.sleep(delay)
+            sendmessage('[...ist beschäftigt.]',chatid)
+        timeout = time.time() + delay
+        while time.time() < timeout:
+            time.sleep(.5)
 
-    def execute(self, parameter):
+    def execute(self, parameter, chatid):
+        self.script_buffer=""
         if Config.debug:
             Config.debugPrint(self.name)
         self.__parameter = parameter
+        awaitingOptions = {}
         for script in self.scripts:
             if Config.pause:
                 Config.debugPause()
             if script.startswith('<<') or script.startswith('[['):
-                self.__doScript(script)
+                self.__doScript(chatid, script)
                 if self.__choices == 2:
-                    self.__makeChoice()
+                    if self.script_buffer!="":
+                        question=self.script_buffer
+                        self.script_buffer=""
+                    else:
+                        question="Auswahl："
+                    awaitingOptions = self.__makeChoice(question, chatid)
+                    self.nextName = "awaiting answer"
                     break
                 continue
             if self.__if[-1]:
-                self.__delay()
-                print(script)
+                if self.script_buffer!="":
+                    self.__delay(chatid)
+                    sendmessage(self.script_buffer,chatid)
+                    self.script_buffer=""
+                self.script_buffer=script
+
             if self.__jumpNow:
                 break
-        return self.nextName, self.__parameter
+        if self.script_buffer!="":
+            self.__delay(chatid)
+            sendmessage(self.script_buffer,chatid)
+        return self.nextName, self.__parameter, awaitingOptions
