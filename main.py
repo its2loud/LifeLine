@@ -1,19 +1,16 @@
-from flask import Flask, request, session
-import ssl
+import os
+import glob
+import pickle
+import logging
+import threading
+
+from flask import Flask, request, jsonify
 from FileReader import FileReader
 from Config import Config
 from ScriptSpliter import ScriptSpliter
-from GameBlock import GameBlock
-import pickle
-import glob
-import os
-import threading
 
-Games = {}
 
-app = Flask(__name__)
-
-class Game:
+class Game(object):
     def __init__(self, config, chatid):
         self.config = config
         fileReader = FileReader(self.config.filename)
@@ -23,113 +20,194 @@ class Game:
         self.chatid=chatid
         self.blockName=""
         self.awaitingOptions = {}
+        self.lock = threading.Lock()
 
-    def awaitingOption(self,incom=""):
-        if incom in self.awaitingOptions:
-            result = self.awaitingOptions[incom]
-            self.awaitingOptions={}
-            print(incom+" => "+result)
-            return result
-        else:
-            print(incom+" Ignored.")
-            return "None"
+    def awaitingOption(self, incom=""):
+        with self.lock:
+            if incom in self.awaitingOptions:
+                result = self.awaitingOptions[incom]
+                self.awaitingOptions={}
+                print(incom+" => "+result)
+                return result
+            else:
+                print(incom+" Ignored.")
+                return None
 
     def savestate(self):
-        state={}
-        state["blockname"]=      self.blockName
-        state["gameParameter"]=  self.__gameParameter
-        state["awaitingOptions"]=self.awaitingOptions
-        with open('save/'+ str(self.chatid) + '.pkl', 'wb') as f:
-            pickle.dump(state, f, pickle.HIGHEST_PROTOCOL)
+        with self.lock:
+            state={}
+            state["blockname"]=      self.blockName
+            state["gameParameter"]=  self.__gameParameter
+            state["awaitingOptions"]=self.awaitingOptions
+            with open('save/'+ str(self.chatid) + '.pkl', 'wb') as f:
+                pickle.dump(state, f, pickle.HIGHEST_PROTOCOL)
 
     def loadstate(self):
-        with open('save/'+ str(self.chatid) + '.pkl', 'rb') as f:
-            state = pickle.load(f)
-        self.blockName=      state["blockname"]
-        self.__gameParameter=state["gameParameter"]
-        self.awaitingOptions=state["awaitingOptions"]    
-        if self.blockName != 'game null pointer' and self.blockName != 'awaiting answer':
-            print("Reloading Blockname: "+self.blockName)
-            self.awaitingOptions={}
-            self.run(self.blockName)
-        else:
-            print("Not reloading Blockname: "+self.blockName)
-            print(self.awaitingOptions)
+        with self.lock:
+            with open('save/'+ str(self.chatid) + '.pkl', 'rb') as f:
+                state = pickle.load(f)
+            self.blockName=      state["blockname"]
+            self.__gameParameter=state["gameParameter"]
+            self.awaitingOptions=state["awaitingOptions"]
+            if self.blockName != 'game null pointer' and self.blockName != 'awaiting answer':
+                print("Reloading Blockname: "+self.blockName)
+                self.awaitingOptions={}
+                self.run(self.blockName)
+            else:
+                print("Not reloading Blockname: "+self.blockName)
+                print(self.awaitingOptions)
 
-    def run(self,blockName="Start"):
-        self.blockName=blockName
+    def run(self, blockName="Start"):
+        self.blockName = blockName
         self.savestate()
-        while self.blockName != 'game null pointer' and self.blockName != 'awaiting answer':
-            self.blockName, self.__gameParameter, self.awaitingOptions = self.__gameBlocks[self.blockName].execute(self.__gameParameter,self.chatid)
+        while (self.blockName != 'game null pointer' and
+                self.blockName != 'awaiting answer'):
+            self.blockName, self.__gameParameter, self.awaitingOptions = \
+                self.__gameBlocks[self.blockName].execute(
+                    self.__gameParameter,self.chatid)
             print("Blockname: ["+self.blockName+"]")
             self.savestate()
 
-def process_message(msg):
-    chat_id = msg.get('chat').get('id')
-    incom = msg.get('text')
-    print(str(chat_id)+": "+incom)
-    global Games
-    if incom[:6] == "/start":
-        print("Starting new game. Playing ID: '"+str(chat_id)+"'")
-        if not (chat_id in Games):
-            Games[chat_id] = Game(config,chat_id)
-            Games[chat_id].run("Start")
-        else:
-            print("Game with Playing ID '"+str(chat_id)+"' is already running.")
-    elif incom[:8] == "/restart":
-        try:
-            print("Restarting Game with Playing ID: "+str(chat_id))
-            del Games[chat_id]
-            Games[chat_id] = Game(config,chat_id)
-            Games[chat_id].run("Start")
-        except Exception as e:
-            print(str(e))
-    elif incom[:12] == "/jumptoblock":
-        try:
-            blockname=incom[13:]
-            print("Jumping to Blockname '"+blockname+"'. Playing ID: '"+str(chat_id)+"'")
-            if (chat_id in Games):
-                Games[chat_id].run(blockname)
-            else:
-                print("Game with Playing ID '"+str(chat_id)+"' is not running.")
-        except Exception as e:
-            print(str(e))
-    else:
-        if chat_id in Games:
-            nextBlock = Games[chat_id].awaitingOption(str(incom))
-            if nextBlock != "None":
-                Games[chat_id].run(nextBlock)
-        else:
-            print("Game with Playing ID '"+str(chat_id)+"' not found.")
-    return "true"
 
-def loadsavefiles():
-    global Games
-    for savefile in glob.glob("save/*.pkl"):
-        chat_id = int(os.path.splitext(os.path.basename(savefile))[0])
-        print("loading: "+str(chat_id))
-        Games[chat_id] = Game(config,chat_id)
-        t = threading.Thread(target=Games[chat_id].loadstate)
-        t.daemon = True
-        t.start()
+class GameServer(Flask):
+    def __init__(self, *args, **kwargs):
+        super(GameServer, self).__init__(*args, **kwargs)
+        self.game_config = Config()
+        self.games = self.loadsavefiles()
+        self.lock = threading.Lock()
+
+    def loadsavefiles(self):
+        games = {}
+        for savefile in glob.glob("save/*.pkl"):
+            chat_id = int(os.path.splitext(os.path.basename(savefile))[0])
+            print("loading: {0}".format(chat_id))
+            game = Game(self.game_config, chat_id)
+            game.loadstate()
+            games[chat_id] = game
+        return games
+
+    def process_message(self, msg):
+        chat_id = msg.get('chat').get('id')
+        incom = msg.get('text')
+        print("{0}: {1}".format(chat_id, incom))
+
+        handler = None  # tuple (function, argument)
+        if incom.startswith("/start"):
+            handler = self.cmd_start, (chat_id,)
+        elif incom.startswith("/restart"):
+            handler = self.cmd_restart, (chat_id,)
+        elif incom.startswith("/jumptoblock"):
+            blockname = incom.split(" ", 2)[1]
+            handler = self.cmd_jumptoblock, (chat_id, blockname)
+        else:
+            handler = self.cmd_next_block, (chat_id, incom)
+
+        fun, args = handler
+        try:
+            fun(*args)
+        except Exception as e:
+            logging.error(
+                "Something went wrong in Playing Id '{0}': {1}".format(
+                    chat_id, str(e)))
+
+    def cmd_start(self, chat_id):
+        with self.lock:
+            if chat_id in self.games:
+                print("Game with Playing ID '{0}' is already running.".format(
+                    chat_id))
+                return
+
+            print("Starting new game. Playing ID: '{0}'".format(chat_id))
+            game = self.games[chat_id] = Game(self.game_config, chat_id)
+        game.run("Start")
+
+    def cmd_restart(self, chat_id):
+        with self.lock:
+            if chat_id not in self.games:
+                print("Game with Playing ID '{0}' is not running.".format(
+                    chat_id))
+                return
+
+            print("Restarting Game with Playing ID: {0}".format(chat_id))
+            del self.games[chat_id]
+            game = self.games[chat_id] = Game(self.game_config, chat_id)
+        game.run("Start")
+
+    def cmd_jumptoblock(self, chat_id, blockname):
+        with self.lock:
+            if chat_id not in self.games:
+                print("Game with Playing ID '{0}' is not running.".format(
+                    chat_id))
+                return
+            game = self.games[chat_id]
+
+        print("Jumping to Blockname '{0}'. Playing ID: '{1}'".format(
+            blockname, chat_id))
+        game.run(blockname)
+
+    def cmd_next_block(self, chat_id, incom):
+        with self.lock:
+            if chat_id not in self.games:
+                print("Game with Playing ID '{0}' is not running.".format(
+                    chat_id))
+                return
+            game = self.games[chat_id]
+
+        nextBlock = game.awaitingOption(incom)
+        if nextBlock is not None:
+            game.run(nextBlock)
+
+app = GameServer(__name__)
+
 
 @app.route("/", methods=['POST'])
 def webhook():
-   #print(request.json)
-   msg = request.json.get('message')
-   if msg and msg.get('text'):
-        t = threading.Thread(target=process_message, args=(msg,))
+    """Called by telegram"""
+    if request.json is None:
+        logging.info("Got unexpected message. Drop it.")
+        return 'ok'
+
+    msg = request.json.get('message', None)
+    if msg and msg.get('text'):
+        t = threading.Thread(target=app.process_message, args=(msg,))
         t.daemon = True
         t.start()
-   return 'ok'
+    return 'ok'
 
-config = Config()
-loadsavefiles()
-if __name__ == "__main__":
-    context = ('PATH/public.pem', '/PATH/ds_private.key')
+
+@app.route("/stats")
+def stats():
+    with app.lock:
+        return jsonify({
+            'num_games': len(app.games),
+            'games': [
+                {
+                    'id': chat_id,
+                    'block': game.blockName,
+                    'awaiting': game.awaitingOptions
+                }
+                for chat_id, game in app.games.items()],
+            'num_threads': threading.active_count()
+        })
+
+
+def main():
+    if not os.path.exists('save'):
+        os.mkdir('save')
+
+    context = ('certs/public.pem', 'certs/ds_private.key')
+    if not all(map(os.path.exists, context)):
+        logging.warning(
+            "Certificate(s) not exists. Server will run in http-mode and "
+            "won't be able to communicate with Telegram.")
+        context = None
+
     app.run(
         host='0.0.0.0',
-        port=XX,
+        port=8080,
         ssl_context=context,
         threaded=True,
-        debug=False)
+        debug=True)
+
+if __name__ == "__main__":
+    main()
