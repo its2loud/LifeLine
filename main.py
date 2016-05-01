@@ -76,6 +76,24 @@ def process_message(msg):
             Games[chat_id].run("Start")
         else:
             print("Game with Playing ID '"+str(chat_id)+"' is already running.")
+    elif incom[:8] == "/restart":
+        try:
+            print("Restarting Game with Playing ID: "+str(chat_id))
+            del Games[chat_id]
+            Games[chat_id] = Game(config,chat_id)
+            Games[chat_id].run("Start")
+        except Exception as e:
+            print(str(e))
+    elif incom[:12] == "/jumptoblock":
+        try:
+            blockname=incom[13:]
+            print("Jumping to Blockname '"+blockname+"'. Playing ID: '"+str(chat_id)+"'")
+            if (chat_id in Games):
+                Games[chat_id].run(blockname)
+            else:
+                print("Game with Playing ID '"+str(chat_id)+"' is not running.")
+        except Exception as e:
+            print(str(e))
     else:
         if chat_id in Games:
             nextBlock = Games[chat_id].awaitingOption(str(incom))
@@ -97,6 +115,7 @@ def loadsavefiles():
 
 @app.route("/", methods=['POST'])
 def webhook():
+   #print(request.json)
    msg = request.json.get('message')
    if msg and msg.get('text'):
         t = threading.Thread(target=process_message, args=(msg,))
@@ -107,7 +126,7 @@ def webhook():
 config = Config()
 loadsavefiles()
 if __name__ == "__main__":
-    context = ('/PATH/public.pem', '/PATH/private.key')
+    context = ('PATH/public.pem', '/PATH/ds_private.key')
     app.run(
         host='0.0.0.0',
         port=XX,
